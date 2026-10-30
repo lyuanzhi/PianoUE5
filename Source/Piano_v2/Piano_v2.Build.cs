@@ -10,11 +10,9 @@ public class Piano_v2 : ModuleRules
 	
 		PublicDependencyModuleNames.AddRange(new string[] { "Core", "CoreUObject", "Engine", "InputCore", "Python3" });
 
-		PrivateDependencyModuleNames.AddRange(new string[] {  });
+		// ink wash: ProceduralMeshComponent for the brush stroke and the mountains, Slate for the closing seal
+		PrivateDependencyModuleNames.AddRange(new string[] { "ProceduralMeshComponent", "Slate", "SlateCore" });
 
-		// Uncomment if you are using Slate UI
-		// PrivateDependencyModuleNames.AddRange(new string[] { "Slate", "SlateCore" });
-		
 		// Uncomment if you are using online features
 		// PrivateDependencyModuleNames.Add("OnlineSubsystem");
 
