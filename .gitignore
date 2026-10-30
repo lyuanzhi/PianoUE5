@@ -1,0 +1,13 @@
+# 虚幻盒子自动安装的 UnrealAgentLink 插件，不需要进版本库
+Plugins/UnrealAgentLink/
+
+# 虚幻编译产物和缓存
+Binaries/
+Intermediate/
+Saved/
+DerivedDataCache/
+
+# 运行时由 Content/convert.py 生成的曲谱数据
+Content/keys.txt
+Content/velocities.txt
+Content/press_times.txt
