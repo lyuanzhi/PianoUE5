@@ -8,12 +8,17 @@ A piano game created with Unreal Engine 5 for piano teaching. This piano can pla
 
 ## Usage
 1. clone the repo
-2. unzip ```WindowsApp.zip```
-3. run ```Piano_v2.exe```
-##### Note: Because I used ```GitHub LFS (Large File Storage)``` for ```WindowsApp.zip```, downloading the zip directly will not include ```WindowsApp.zip```.
+2. install the [Dependencies](#dependencies)
+3. open ```Piano_v2.uproject``` with Unreal Engine 5.8 (the C++ module is built on first open), or [package the project](#package-project) and run ```Piano_v2.exe```
 
 ## Dependencies
-1. Unreal Engine 5.1.1
+1. Unreal Engine 5.8
+2. Visual Studio 2022 (17.14+) or Visual Studio 2026, with the ```Game development with C++``` workload, to build the C++ module
+3. ```mido``` and ```numpy```, installed into the Python that ships with the engine:
+```
+"C:\Program Files\Epic Games\UE_5.8\Engine\Binaries\ThirdParty\Python3\Win64\python.exe" -m pip install mido numpy
+```
+##### Note: ```convert.py``` runs on the engine's bundled Python, both in the editor and in packaged builds, so the packages must be installed there rather than in a system Python.
 
 ## Design
 ### Load MIDI File
@@ -38,6 +43,7 @@ A piano game created with Unreal Engine 5 for piano teaching. This piano can pla
 
 ## Package Project
 ![](imgs/package.png)
+##### The packaged build includes the engine's Python (with ```mido``` and ```numpy```) through the ```Python3``` module dependency, and ```convert.py``` and ```Content/MIDI``` through ```RuntimeDependencies``` in ```Piano_v2.Build.cs```, so no files need to be copied by hand after packaging.
 
 ## Demo Screenshots
 ![](imgs/demo.gif)

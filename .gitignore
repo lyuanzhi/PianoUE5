@@ -6,6 +6,7 @@ Binaries/
 Intermediate/
 Saved/
 DerivedDataCache/
+Build/*/FileOpenOrder/
 
 # 运行时由 Content/convert.py 生成的曲谱数据
 Content/keys.txt

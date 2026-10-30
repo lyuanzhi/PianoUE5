@@ -19,5 +19,9 @@ public class Piano_v2 : ModuleRules
 		// PrivateDependencyModuleNames.Add("OnlineSubsystem");
 
 		// To include OnlineSubsystemSteam, add it to the plugins section in your uproject file with the Enabled attribute set to true
+
+		// convert.py and the MIDI files are read from Content/ as loose files at runtime, so stage them outside the pak
+		RuntimeDependencies.Add("$(ProjectDir)/Content/convert.py", StagedFileType.NonUFS);
+		RuntimeDependencies.Add("$(ProjectDir)/Content/MIDI/*.mid", StagedFileType.NonUFS);
 	}
 }
