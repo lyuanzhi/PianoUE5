@@ -42,15 +42,18 @@ A piano game created with Unreal Engine 5 for piano teaching. This piano can pla
 ![](imgs/ChooseSong.png)
 
 ## Ink Wash Mode
-The default level, ```Content/InkWash/Maps/Piano_Scene_Ink```, renders the scene as a three-dimensional ink wash painting on white xuan paper, and the piano paints it as it plays:
+The default level, ```Content/InkWash/Maps/Piano_Scene_Ink```, is a three-dimensional ink wash painting of a river among karst peaks, on white xuan paper. The piano stands on the water, and its music paints the landscape around it:
 
 ![](imgs/inkwash_play.png)
 
-1. **Ink wash rendering**: a post process draws brush outlines from scene depth, reduces the colours to a few tones of ink, and lets the distant ground fade into blank paper (留白).
-2. **Ink drops**: every note flicks a drop of ink off its key. The drop is released early so that it hits the paper on the same frame the note sounds, then spreads into a stain. Strong notes also raise a cloud of ink.
-3. **Calligraphy in the air**: the melody is written behind the piano. The brush rises and falls with the top note and presses harder on louder notes, and its trail dries out into flying white (飞白).
-4. **Landscape scroll**: mountains grow from left to right as the song goes on. Low notes build the far range and high notes build the near hills.
-5. **Finale**: when the song ends, the camera pulls back over the whole painting and a vermilion seal with the song's name is stamped on it.
+1. **The piano**: the grand piano keeps its own realistic materials and lighting. Everything around it is painted in ink, and the paper shows fibres and grain.
+2. **Peaks rising with the song**: karst peaks rise out of the mist all around the river as the song goes on. High notes raise the near cliffs, and low notes raise the distant ranges, measured against the song's own range so that every song paints the whole landscape. A long song sweeps across the river several times, so the landscape appears within the first minute and keeps growing.
+3. **A world you can walk into**: the near cliffs, the boulders at their feet and the trees among them are solid. The player can walk across the water up to them, around them and between them.
+4. **The inscription**: the melody writes *高山流水* ("high mountains, flowing water", the story of a qin player and the friend who heard the mountains and the river in his music) in the sky over the river. The brush writes real kaishu characters stroke by stroke in stroke order. It is heavy at the start of each stroke and runs dry into flying white (飞白) on long strokes.
+5. **The water**: the river is blank paper. Every peak and the piano are mirrored in it, and the reflections break into ripples and fade as they go deeper. As the piano plays, rings run across the water from around its feet.
+6. **Finale**: when the song ends, the camera pulls back over the river, any unfinished peaks rise, and a vermilion stone seal with the song's name is stamped on the painting. Moving or looking around gives the view back to the player.
+
+![](imgs/inkwash_closeup.png)
 
 ![](imgs/inkwash_finale.png)
 
@@ -61,8 +64,11 @@ Console commands (open the console with ```~```):
 | Command | Effect |
 |---|---|
 | ```ink.Song <index or name>``` | load a song from ```Content/MIDI``` by its index in the song list or part of its name, e.g. ```ink.Song 13``` |
+| ```ink.Grow``` | raise every peak to its full height now |
 | ```ink.Finale``` | pull back and stamp the seal now |
 | ```ink.Reset``` | wipe the painting |
+
+##### The song title and the seal use the [Ma Shan Zheng](https://github.com/googlefonts/mashanzheng) brush font, licensed under the SIL Open Font License (```Content/InkWash/Fonts/MaShanZheng-OFL.txt```). The strokes of the inscription come from [Hanzi Writer](https://github.com/chanind/hanzi-writer-data) / [Make Me a Hanzi](https://github.com/skishore/makemeahanzi), derived from fonts by Arphic Technology under the Arphic Public License (```Source/Piano_v2/InkGlyphs-ARPHICPL.txt```).
 
 ## Package Project
 ![](imgs/package.png)

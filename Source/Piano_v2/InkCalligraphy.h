@@ -7,12 +7,15 @@
 #include "ProceduralMeshComponent.h"
 #include "InkCalligraphy.generated.h"
 
+class UMaterialInstanceDynamic;
 class UMaterialInterface;
 
 /**
- * The melody written in the air: a brush sweeps back and forth on an arc behind the piano, rising and
- * falling with the top note and pressing down on every note. The trail is a camera-facing ribbon that dries
- * out into fei bai as it ages.
+ * The melody writes an inscription over the river, the way a painter inscribes a landscape: gao shan liu shui,
+ * high mountains and flowing water, the old story of a qin player and the one friend who heard the mountains
+ * and the river in his music. Every note of the melody moves the brush on, stroke by stroke in stroke order,
+ * pausing as the brush lifts between strokes. The characters are real kaishu outlines; the ink is laid on
+ * heavy at the start of each stroke and runs dry towards its end.
  */
 UCLASS()
 class PIANO_V2_API AInkCalligraphy : public AActor
@@ -27,83 +30,61 @@ public:
 	// A melody note: when it sounds, its key (0 = A0 .. 87 = C8) and how heavily it is played (0..1)
 	void AddNote(double Time, int32 Key, float Weight);
 
-	// Lift the brush and wipe the stroke
+	// How many melody notes the song has and how long it lasts, so the inscription is written at a pace that
+	// finishes it a little before the end of a short song, and within about a minute and a half of a long one
+	void SetSong(int32 MelodyNotes, float Seconds);
+
+	// Wipe the inscription
 	void Clear();
 
 	UPROPERTY(EditAnywhere, Category = "Ink")
-	TObjectPtr<UMaterialInterface> StrokeMaterial;
+	TObjectPtr<UMaterialInterface> InkMaterial;
 
-	// The brush swings on a half circle of this radius around this point, behind the piano
+	// Top of the right-hand column; the inscription is two columns read top to bottom, right to left
 	UPROPERTY(EditAnywhere, Category = "Ink")
-	FVector ArcCenter = FVector(0.f, -200.f, 0.f);
+	FVector Top = FVector(-500.f, -7000.f, 4300.f);
 
+	// Height of one character (cm)
 	UPROPERTY(EditAnywhere, Category = "Ink")
-	float ArcRadius = 480.f;
+	float CharacterSize = 600.f;
 
-	// Seconds for one swing there and back
+	// Characters in one column
 	UPROPERTY(EditAnywhere, Category = "Ink")
-	float SwingSeconds = 14.f;
+	int32 PerColumn = 2;
 
-	// Heights of the lowest and the highest key
+	// How fast the brush travels along a stroke, in em units per second (a character is 1024 units tall), so a
+	// dot is flicked in and a long stroke drawn out
 	UPROPERTY(EditAnywhere, Category = "Ink")
-	float LowZ = 110.f;
+	float BrushSpeed = 700.f;
 
+	// How long the brush lifts between two strokes (seconds)
 	UPROPERTY(EditAnywhere, Category = "Ink")
-	float HighZ = 340.f;
+	float LiftSeconds = 0.18f;
 
-	// How long the stroke stays on the air before it has dried away
-	UPROPERTY(EditAnywhere, Category = "Ink")
-	float TrailSeconds = 5.f;
-
-	UPROPERTY(EditAnywhere, Category = "Ink")
-	float MinWidth = 8.f;
-
-	UPROPERTY(EditAnywhere, Category = "Ink")
-	float MaxWidth = 70.f;
-
-	// With no note for this long the brush lifts off
-	UPROPERTY(EditAnywhere, Category = "Ink")
-	float LiftAfter = 2.5f;
+protected:
+	virtual void BeginPlay() override;
 
 private:
 	struct FNote
 	{
 		double Time;
-		float Z;
 		float Weight;
 	};
 
-	struct FTrailPoint
-	{
-		FVector Position;
-		float Pressure;
-		double Time;
-		float Distance;
-	};
-
-	void UpdateBrush(float DeltaSeconds, double Now);
-	void UpdateMesh(double Now);
+	void BuildMesh();
 
 	UPROPERTY()
 	TObjectPtr<UProceduralMeshComponent> Mesh;
 
+	UPROPERTY()
+	TObjectPtr<UMaterialInstanceDynamic> MID;
+
 	TArray<FNote> Pending;
-	// oldest first
-	TArray<FTrailPoint> Trail;
-
-	double LastNoteTime = -1000.0;
-	double LastSampleTime = -1000.0;
-	double SwingTime = 0.0;
-	float HeadZ = 0.f;
-	float TargetZ = 0.f;
-	float Pressure = 0.f;
-	float Travelled = 0.f;
-	bool bMeshCreated = false;
-
-	TArray<FVector> Vertices;
-	TArray<int32> Triangles;
-	TArray<FVector> Normals;
-	TArray<FVector2D> UVs;
-	TArray<FLinearColor> Colors;
-	TArray<FProcMeshTangent> Tangents;
+	// how much of the inscription the notes have asked for, and how much the brush has written (strokes, the
+	// fraction being how far along the current one)
+	float Target = 0.f;
+	float Written = 0.f;
+	float StrokesPerNote = 0.25f;
+	// the brush is lifted between strokes until then
+	double LiftedUntil = 0.0;
 };

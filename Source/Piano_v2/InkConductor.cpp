@@ -2,15 +2,21 @@
 
 
 #include "InkConductor.h"
+#include "Algo/AllOf.h"
+#include "Blueprint/UserWidget.h"
+#include "Blueprint/WidgetTree.h"
 #include "Camera/CameraActor.h"
 #include "Camera/CameraComponent.h"
 #include "Camera/PlayerCameraManager.h"
-#include "Components/DecalComponent.h"
 #include "Components/StaticMeshComponent.h"
+#include "Components/TextBlock.h"
+#include "Engine/FontFace.h"
 #include "Engine/GameViewportClient.h"
 #include "Engine/StaticMesh.h"
 #include "Engine/World.h"
 #include "EngineUtils.h"
+#include "Fonts/CompositeFont.h"
+#include "GameFramework/Pawn.h"
 #include "GameFramework/PlayerController.h"
 #include "HAL/IConsoleManager.h"
 #include "InkCalligraphy.h"
@@ -21,8 +27,11 @@
 #include "Styling/CoreStyle.h"
 #include "TimerManager.h"
 #include "UObject/ConstructorHelpers.h"
+#include "UObject/UObjectIterator.h"
+#include "Widgets/Images/SImage.h"
 #include "Widgets/Layout/SBorder.h"
 #include "Widgets/Layout/SBox.h"
+#include "Widgets/SOverlay.h"
 #include "Widgets/Text/STextBlock.h"
 
 DEFINE_LOG_CATEGORY_STATIC(LogInk, Log, All);
@@ -45,16 +54,14 @@ AInkConductor::AInkConductor()
 	PrimaryActorTick.bCanEverTick = true;
 	RootComponent = CreateDefaultSubobject<USceneComponent>(TEXT("Root"));
 
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> Drop(TEXT("/Game/InkWash/Materials/M_InkDropSolid"));
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> Cloud(TEXT("/Game/InkWash/Materials/M_InkCloudEvt"));
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> Stain(TEXT("/Game/InkWash/Materials/M_InkStainEvt"));
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> Sphere(TEXT("/Engine/BasicShapes/Sphere"));
-	static ConstructorHelpers::FObjectFinder<UStaticMesh> Cube(TEXT("/Engine/BasicShapes/Cube"));
-	DropMaterial = Drop.Object;
-	CloudMaterial = Cloud.Object;
-	StainMaterial = Stain.Object;
-	DropMesh = Sphere.Object;
-	CloudMesh = Cube.Object;
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> Ripple(TEXT("/Game/InkWash/Materials/M_InkRipple"));
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> SealStone(TEXT("/Game/InkWash/Materials/M_InkSeal"));
+	static ConstructorHelpers::FObjectFinder<UStaticMesh> Plane(TEXT("/Engine/BasicShapes/Plane"));
+	static ConstructorHelpers::FObjectFinder<UFontFace> Brush(TEXT("/Game/InkWash/Fonts/MaShanZheng-Regular"));
+	RippleMaterial = Ripple.Object;
+	SealMaterial = SealStone.Object;
+	RippleMesh = Plane.Object;
+	BrushFace = Brush.Object;
 }
 
 void AInkConductor::BeginPlay()
@@ -69,13 +76,22 @@ void AInkConductor::BeginPlay()
 	}
 	CacheKeys();
 	CreatePools();
+	if (BrushFace)
+	{
+		TSharedRef<FCompositeFont> Composite = MakeShared<FCompositeFont>();
+		Composite->DefaultTypeface.Fonts.Emplace_GetRef(TEXT("Regular")).Font = FFontData(BrushFace);
+		BrushComposite = Composite;
+	}
 	PrewarmShaders();
 
 	FActorSpawnParameters Spawn;
 	Spawn.Owner = this;
 	Calligraphy = GetWorld()->SpawnActor<AInkCalligraphy>(AInkCalligraphy::StaticClass(), FTransform::Identity, Spawn);
-	Landscape = GetWorld()->SpawnActor<AInkLandscape>(AInkLandscape::StaticClass(), FTransform::Identity, Spawn);
-	Landscape->WaterZ = KeyImpact[NumKeys / 2].Z;
+	// deferred, so the landscape knows where the water is when it builds its peaks
+	Landscape = GetWorld()->SpawnActorDeferred<AInkLandscape>(AInkLandscape::StaticClass(), FTransform::Identity, this);
+	Landscape->WaterZ = WaterZ;
+	Landscape->FinishSpawning(FTransform::Identity);
+	Landscape->Reflect(Piano);
 	FinaleCamera = GetWorld()->SpawnActor<ACameraActor>(ACameraActor::StaticClass(), FTransform::Identity, Spawn);
 	FinaleCamera->GetCameraComponent()->SetConstraintAspectRatio(false);
 
@@ -133,35 +149,15 @@ bool AInkConductor::FindPiano()
 
 void AInkConductor::CacheKeys()
 {
-	KeyEdge.Init(FVector::ZeroVector, NumKeys);
-	KeyImpact.Init(FVector::ZeroVector, NumKeys);
-	const FVector Forward = Piano->GetActorForwardVector();
+	// the water lies on the ground the piano stands on; the rings start from just beyond its feet
+	const FBox Box = Piano->GetComponentsBoundingBox();
 	FCollisionQueryParams TraceParams;
 	TraceParams.AddIgnoredActor(Piano);
-
-	TInlineComponentArray<UStaticMeshComponent*> Meshes(Piano);
-	for (UStaticMeshComponent* Mesh : Meshes)
-	{
-		// the keys are SM_Key1 (A0) .. SM_Key88 (C8)
-		FString Number = Mesh->GetName();
-		if (!Number.RemoveFromStart(TEXT("SM_Key")) || !Number.IsNumeric())
-		{
-			continue;
-		}
-		const int32 Key = FCString::Atoi(*Number) - 1;
-		if (!KeyEdge.IsValidIndex(Key))
-		{
-			continue;
-		}
-		const FBoxSphereBounds& Bounds = Mesh->Bounds;
-		const float HalfDepth = FMath::Abs(FVector::DotProduct(Bounds.BoxExtent, Forward));
-		KeyEdge[Key] = Bounds.Origin + Forward * HalfDepth + FVector(0.f, 0.f, Bounds.BoxExtent.Z);
-
-		FVector Impact = KeyEdge[Key] + Forward * FrontOffset;
-		FHitResult Hit;
-		Impact.Z = GetWorld()->LineTraceSingleByChannel(Hit, Impact, Impact - FVector(0.f, 0.f, 1000.f), ECC_Visibility, TraceParams) ? Hit.ImpactPoint.Z : 0.f;
-		KeyImpact[Key] = Impact;
-	}
+	FHitResult Hit;
+	const FVector Center = Box.GetCenter();
+	WaterZ = GetWorld()->LineTraceSingleByChannel(Hit, Center, Center - FVector(0.f, 0.f, 10000.f), ECC_Visibility, TraceParams) ? Hit.ImpactPoint.Z : Box.Min.Z;
+	RippleCenter = FVector(Center.X, Center.Y, WaterZ);
+	RippleInner = FMath::Max(Box.GetExtent().X, Box.GetExtent().Y) * 0.85f;
 }
 
 void AInkConductor::CreatePools()
@@ -173,8 +169,6 @@ void AInkConductor::CreatePools()
 		Comp->SetMobility(EComponentMobility::Movable);
 		Comp->SetCollisionEnabled(ECollisionEnabled::NoCollision);
 		Comp->SetCastShadow(false);
-		// ink is marked in custom depth so the ink-wash post process keeps it in ink tones
-		Comp->SetRenderCustomDepth(true);
 		Comp->SetVisibility(false);
 		Comp->SetupAttachment(RootComponent);
 		Comp->RegisterComponent();
@@ -182,57 +176,27 @@ void AInkConductor::CreatePools()
 		return Comp;
 	};
 
-	for (int32 i = 0; i < DropPoolSize; ++i)
+	for (int32 i = 0; i < RipplePoolSize; ++i)
 	{
-		Drops.Add(CreateMesh(DropMesh, DropMaterial));
+		UStaticMeshComponent* Ripple = CreateMesh(RippleMesh, RippleMaterial);
+		UMaterialInstanceDynamic* MID = UMaterialInstanceDynamic::Create(RippleMaterial, Ripple);
+		MID->SetScalarParameterValue(TEXT("Inner"), RippleInner);
+		Ripple->SetMaterial(0, MID);
+		Ripples.Add(Ripple);
+		RippleMIDs.Add(MID);
 	}
-	DropFrom.Init(FVector::ZeroVector, Drops.Num());
-	DropTo.Init(FVector::ZeroVector, Drops.Num());
-	DropImpact.Init(Idle, Drops.Num());
-
-	for (int32 i = 0; i < CloudPoolSize; ++i)
-	{
-		UStaticMeshComponent* Cloud = CreateMesh(CloudMesh, CloudMaterial);
-		UMaterialInstanceDynamic* MID = UMaterialInstanceDynamic::Create(CloudMaterial, Cloud);
-		MID->SetScalarParameterValue(TEXT("Steps"), CloudSteps);
-		Cloud->SetMaterial(0, MID);
-		Clouds.Add(Cloud);
-		CloudMIDs.Add(MID);
-	}
-	CloudEnd.Init(Idle, Clouds.Num());
-
-	for (int32 i = 0; i < StainPoolSize; ++i)
-	{
-		UDecalComponent* Stain = NewObject<UDecalComponent>(this);
-		// just big enough for the widest bleed and the ripples, which fade out at RingMax
-		Stain->DecalSize = FVector(32.f, 110.f, 110.f);
-		Stain->SetVisibility(false);
-		Stain->SetupAttachment(RootComponent);
-		Stain->RegisterComponent();
-		UMaterialInstanceDynamic* MID = UMaterialInstanceDynamic::Create(StainMaterial, Stain);
-		MID->SetScalarParameterValue(TEXT("RingMax"), 100.f);
-		Stain->SetDecalMaterial(MID);
-		Stains.Add(Stain);
-		StainMIDs.Add(MID);
-	}
-	StainEnd.Init(Idle, Stains.Num());
+	RippleEnd.Init(Idle, Ripples.Num());
 }
 
 void AInkConductor::PrewarmShaders()
 {
-	// Show one cloud and one stain with a long-past impact time for the first half second: they draw nothing,
-	// but their shaders get compiled before the first note instead of stalling it.
-	if (!Clouds.IsEmpty())
+	// Show one ring with a long-past impact time for the first half second: it draws nothing, but its shader
+	// gets compiled before the first note instead of stalling it.
+	if (!Ripples.IsEmpty())
 	{
-		Clouds[0]->SetWorldLocation(KeyImpact[NumKeys / 2]);
-		Clouds[0]->SetVisibility(true);
-		CloudEnd[0] = 0.5;
-	}
-	if (!Stains.IsEmpty())
-	{
-		Stains[0]->SetWorldLocationAndRotation(KeyImpact[NumKeys / 2], FRotator(-90.f, 0.f, 0.f));
-		Stains[0]->SetVisibility(true);
-		StainEnd[0] = 0.5;
+		Ripples[0]->SetWorldLocation(RippleCenter);
+		Ripples[0]->SetVisibility(true);
+		RippleEnd[0] = 0.5;
 	}
 }
 
@@ -280,9 +244,14 @@ void AInkConductor::Tick(float DeltaSeconds)
 	}
 	const double Now = GetWorld()->GetTimeSeconds();
 	FollowPlayback(Now);
-	MoveDrops(Now);
 	RetireExpired(Now);
 	UpdateFinale(Now);
+	// the piano creates its widgets whenever it likes, so keep an eye out for new ones
+	if (Now >= NextHudCheck)
+	{
+		NextHudCheck = Now + 0.5;
+		RestyleHud();
+	}
 }
 
 void AInkConductor::FollowPlayback(double Now)
@@ -294,6 +263,7 @@ void AInkConductor::FollowPlayback(double Now)
 	{
 		LastIndex = Index;
 		LastRowCount = Rows;
+		ReadSong();
 		return;
 	}
 
@@ -307,6 +277,10 @@ void AInkConductor::FollowPlayback(double Now)
 		{
 			// a new song, or the same one from the top: a fresh sheet of paper
 			ResetPainting();
+		}
+		if (Rows != LastRowCount)
+		{
+			ReadSong();
 		}
 		TArray<int32> PlayedRow;
 		if (bFollowing && bWasFollowing && ReadRow(KeysProp, Index - 1, PlayedRow) && PlayedRow.Num() > 0)
@@ -337,7 +311,7 @@ void AInkConductor::FollowPlayback(double Now)
 	}
 
 	// Every row starts with the delay before it, so the time each coming row sounds is known in advance.
-	// Release the drops of every row that sounds within the next FallTime seconds.
+	// Hand on the notes of every row that sounds within the next LookAhead seconds.
 	TArray<int32> Row;
 	double RowTime = RowPlayedTime;
 	for (int32 Next = LastPlayedRow + 1; Next < Rows; ++Next)
@@ -353,7 +327,7 @@ void AInkConductor::FollowPlayback(double Now)
 			bFollowing = false;
 			break;
 		}
-		if (RowTime - Now > FallTime)
+		if (RowTime - Now > LookAhead)
 		{
 			break;
 		}
@@ -372,39 +346,34 @@ void AInkConductor::SpawnRow(int32 RowIndex, double ImpactTime)
 	ReadRow(KeysProp, RowIndex, Keys);
 	ReadRow(VelocitiesProp, RowIndex, Velocities);
 
-	float Strongest = 0.f;
-	FVector StrongestAt = FVector::ZeroVector;
 	int32 TopKey = INDEX_NONE;
 	float TopWeight = 0.f;
 	const float Progress = RowIndex / float(FMath::Max(RowCount() - 1, 1));
+	float Loudest = 0.f;
 	// element 0 of a row is its delay; the notes follow
 	for (int32 i = 1; i < Keys.Num(); ++i)
 	{
 		const int32 Key = Keys[i];
-		if (!KeyImpact.IsValidIndex(Key))
+		if (Key < 0 || Key >= NumKeys)
 		{
 			continue;
 		}
 		const float Velocity = Velocities.IsValidIndex(i) ? Velocities[i] : 64.f;
 		// louder notes carry more ink, and low notes more than high ones
 		const float Weight = FMath::Min(FMath::Clamp((Velocity - 20.f) / 90.f, 0.15f, 1.f) * FMath::Lerp(1.05f, 0.7f, Key / float(NumKeys - 1)), 1.f);
-		SpawnDrop(Key, ImpactTime, Weight);
-		SpawnStain(KeyImpact[Key], ImpactTime, Weight);
 		Landscape->AddNote(ImpactTime, Progress, Key, Weight);
-		if (Weight > Strongest)
-		{
-			Strongest = Weight;
-			StrongestAt = KeyImpact[Key];
-		}
+		Loudest = FMath::Max(Loudest, Weight);
 		if (Key > TopKey)
 		{
 			TopKey = Key;
 			TopWeight = Weight;
 		}
 	}
-	if (Strongest >= CloudMinWeight)
+	// one ring for a row, and no more than a few a second, so a fast run does not crowd the water
+	if (Loudest > 0.f && ImpactTime - LastRippleTime >= MinRippleInterval)
 	{
-		SpawnCloud(StrongestAt, ImpactTime, Strongest);
+		SpawnRipple(ImpactTime, Loudest);
+		LastRippleTime = ImpactTime;
 	}
 	if (TopKey != INDEX_NONE)
 	{
@@ -414,81 +383,27 @@ void AInkConductor::SpawnRow(int32 RowIndex, double ImpactTime)
 	UE_LOG(LogInk, Verbose, TEXT("row %d: %d notes, lands at %.3f"), RowIndex, Keys.Num() - 1, ImpactTime);
 }
 
-void AInkConductor::SpawnDrop(int32 Key, double ImpactTime, float Weight)
+void AInkConductor::SpawnRipple(double ImpactTime, float Weight)
 {
-	if (Drops.IsEmpty())
+	if (Ripples.IsEmpty())
 	{
 		return;
 	}
-	const int32 Slot = NextDrop++ % Drops.Num();
-	const float Size = 0.05f + 0.035f * Weight;
-	Drops[Slot]->SetWorldScale3D(FVector(Size, Size, Size * 1.6f));
-	DropFrom[Slot] = KeyEdge[Key];
-	DropTo[Slot] = KeyImpact[Key];
-	DropImpact[Slot] = ImpactTime;
-}
-
-void AInkConductor::MoveDrops(double Now)
-{
-	for (int32 i = 0; i < Drops.Num(); ++i)
-	{
-		const double K = (Now - (DropImpact[i] - FallTime)) / FallTime;
-		const bool bFalling = K >= 0.0 && K < 1.0;
-		if (bFalling)
-		{
-			// flicked off the key: steady across, accelerating down
-			FVector At = FMath::Lerp(DropFrom[i], DropTo[i], K);
-			At.Z = DropFrom[i].Z - (DropFrom[i].Z - DropTo[i].Z) * K * K;
-			Drops[i]->SetWorldLocation(At);
-		}
-		if (Drops[i]->IsVisible() != bFalling)
-		{
-			Drops[i]->SetVisibility(bFalling);
-		}
-	}
-}
-
-void AInkConductor::SpawnStain(const FVector& Impact, double ImpactTime, float Weight)
-{
-	if (Stains.IsEmpty())
-	{
-		return;
-	}
-	const int32 Slot = NextStain++ % Stains.Num();
-	UDecalComponent* Stain = Stains[Slot];
-	// decals project along their X axis: point it straight down onto the water
-	Stain->SetWorldLocationAndRotation(Impact, FRotator(-90.f, 0.f, 0.f));
-	UMaterialInstanceDynamic* MID = StainMIDs[Slot];
-	MID->SetVectorParameterValue(TEXT("Origin"), FLinearColor(Impact.X, Impact.Y, Impact.Z));
+	const int32 Slot = NextRipple++ % Ripples.Num();
+	UStaticMeshComponent* Ripple = Ripples[Slot];
+	// lying a hair above the water, just big enough for the outermost ring (the plane mesh is 100 units across)
+	const float Reach = FMath::Lerp(RippleReach.X, RippleReach.Y, Weight);
+	const float Half = RippleInner + Reach;
+	Ripple->SetWorldLocation(RippleCenter + FVector(0.f, 0.f, 0.3f));
+	Ripple->SetWorldScale3D(FVector(Half / 50.f, Half / 50.f, 1.f));
+	UMaterialInstanceDynamic* MID = RippleMIDs[Slot];
+	MID->SetVectorParameterValue(TEXT("Origin"), FLinearColor(RippleCenter.X, RippleCenter.Y, RippleCenter.Z));
 	MID->SetScalarParameterValue(TEXT("ImpactTime"), ImpactTime);
-	MID->SetScalarParameterValue(TEXT("Life"), StainLife);
+	MID->SetScalarParameterValue(TEXT("Life"), RippleLife);
 	MID->SetScalarParameterValue(TEXT("Size"), Weight);
-	Stain->SetVisibility(true);
-	StainEnd[Slot] = ImpactTime + StainLife;
-}
-
-void AInkConductor::SpawnCloud(const FVector& Impact, double ImpactTime, float Weight)
-{
-	const double Now = GetWorld()->GetTimeSeconds();
-	const int32 Slot = CloudEnd.IndexOfByPredicate([Now](double End) { return End <= Now; });
-	if (Slot == INDEX_NONE)
-	{
-		// every cloud is still billowing: skip this one rather than cut another short
-		return;
-	}
-	UStaticMeshComponent* Cloud = Clouds[Slot];
-	Cloud->SetWorldLocation(Impact + FVector(0.f, 0.f, CloudHeight * 0.5f));
-	// the cube mesh is 100 units across
-	Cloud->SetWorldScale3D(FVector(CloudHalfXY / 50.f, CloudHalfXY / 50.f, CloudHeight / 100.f));
-	UMaterialInstanceDynamic* MID = CloudMIDs[Slot];
-	MID->SetVectorParameterValue(TEXT("Origin"), FLinearColor(Impact.X, Impact.Y, Impact.Z));
-	MID->SetScalarParameterValue(TEXT("ImpactTime"), ImpactTime);
-	MID->SetScalarParameterValue(TEXT("Life"), CloudLife);
-	MID->SetScalarParameterValue(TEXT("Size"), Weight);
-	MID->SetScalarParameterValue(TEXT("HalfXY"), CloudHalfXY);
-	MID->SetScalarParameterValue(TEXT("Height"), CloudHeight);
-	Cloud->SetVisibility(true);
-	CloudEnd[Slot] = ImpactTime + CloudLife;
+	MID->SetScalarParameterValue(TEXT("Reach"), Reach);
+	Ripple->SetVisibility(true);
+	RippleEnd[Slot] = ImpactTime + RippleLife;
 }
 
 void AInkConductor::RetireExpired(double Now)
@@ -503,8 +418,7 @@ void AInkConductor::RetireExpired(double Now)
 			}
 		}
 	};
-	Retire(Stains, StainEnd);
-	Retire(Clouds, CloudEnd);
+	Retire(Ripples, RippleEnd);
 }
 
 void AInkConductor::EndPlay(const EEndPlayReason::Type EndPlayReason)
@@ -515,6 +429,7 @@ void AInkConductor::EndPlay(const EEndPlayReason::Type EndPlayReason)
 
 void AInkConductor::ResetPainting()
 {
+	LastRippleTime = Idle;
 	FinaleAt = -1.0;
 	EndFinale();
 	if (Calligraphy)
@@ -524,6 +439,14 @@ void AInkConductor::ResetPainting()
 	if (Landscape)
 	{
 		Landscape->Clear();
+	}
+}
+
+void AInkConductor::FillLandscape()
+{
+	if (Landscape)
+	{
+		Landscape->Fill();
 	}
 }
 
@@ -577,9 +500,16 @@ void AInkConductor::StartFinale()
 	FinaleFrom = Player->PlayerCameraManager->GetCameraLocation();
 	FinaleFromRotation = Player->PlayerCameraManager->GetCameraRotation().Quaternion();
 	FinaleFromFieldOfView = Player->PlayerCameraManager->GetFOVAngle();
+	FinalePawnAt = Player->GetPawn() ? Player->GetPawn()->GetActorLocation() : FVector::ZeroVector;
+	FinaleControl = Player->GetControlRotation();
 	FinaleCamera->SetActorLocationAndRotation(FinaleFrom, FinaleFromRotation);
 	FinaleCamera->GetCameraComponent()->SetFieldOfView(FinaleFromFieldOfView);
 	Player->SetViewTargetWithBlend(FinaleCamera, 0.f);
+	// whatever the song left unpainted rises while the view pulls back, so the painting is whole when it is sealed
+	if (Landscape)
+	{
+		Landscape->Fill();
+	}
 	UE_LOG(LogInk, Display, TEXT("finale started at %.2f"), FinaleStart);
 }
 
@@ -607,6 +537,16 @@ void AInkConductor::UpdateFinale(double Now)
 	{
 		return;
 	}
+	// the player walking off or looking round takes the view back; a nudge of the mouse does not
+	if (const APlayerController* Player = GetWorld()->GetFirstPlayerController())
+	{
+		const APawn* Pawn = Player->GetPawn();
+		if ((Pawn && FVector::Dist2D(Pawn->GetActorLocation(), FinalePawnAt) > 60.f) || !Player->GetControlRotation().Equals(FinaleControl, 10.f))
+		{
+			EndFinale();
+			return;
+		}
+	}
 
 	// a slow pull back and up, easing in and out, until the piano sits small in front of the whole scroll
 	const float K = FMath::Clamp(float((Now - FinaleStart) / FinaleSeconds), 0.f, 1.f);
@@ -631,6 +571,27 @@ void AInkConductor::UpdateFinale(double Now)
 	}
 }
 
+void AInkConductor::ReadSong()
+{
+	// every key of the song and its length, so the landscape can fit its painting to the song's range and length
+	TArray<int32> Keys;
+	TArray<int32> Row;
+	double Milliseconds = 0.0;
+	int32 MelodyNotes = 0;
+	for (int32 i = 0, Rows = RowCount(); i < Rows; ++i)
+	{
+		if (ReadRow(KeysProp, i, Row) && Row.Num() > 0)
+		{
+			// element 0 is the delay before the row, the notes follow; the top one of each row is the melody
+			Milliseconds += Row[0];
+			Keys.Append(Row.GetData() + 1, Row.Num() - 1);
+			MelodyNotes += Row.Num() > 1 ? 1 : 0;
+		}
+	}
+	Landscape->SetSong(Keys, Milliseconds / 1000.0);
+	Calligraphy->SetSong(MelodyNotes, Milliseconds / 1000.0);
+}
+
 FString AInkConductor::CurrentSongName() const
 {
 	return SongNameProp ? SongNameProp->GetPropertyValue_InContainer(Piano.Get()) : FString();
@@ -643,38 +604,47 @@ void AInkConductor::ShowSeal()
 	{
 		return;
 	}
-	// a square vermilion seal: carved white characters inside a thin white frame
-	const FSlateBrush* Solid = FCoreStyle::Get().GetBrush("WhiteBrush");
+	// a square vermilion seal: characters carved out of the stone inside a frame, the paste uneven and the
+	// edges worn, as the stone material paints them
 	const FLinearColor Carved(1.f, 0.94f, 0.86f);
+	// a short Chinese name is cut the way seals are read: in columns, top to bottom, right to left
+	FString SealText = CurrentSongName();
+	const bool bChinese = SealText.Len() >= 2 && SealText.Len() <= 4 && Algo::AllOf(SealText, [](TCHAR C) { return C >= 0x4E00 && C <= 0x9FFF; });
+	if (bChinese)
+	{
+		const FString S = SealText;
+		SealText = S.Len() == 4 ? FString::Printf(TEXT("%c%c\n%c%c"), S[2], S[0], S[3], S[1]) : FString::JoinBy(S, TEXT("\n"), [](TCHAR C) { return FString(1, &C); });
+	}
+	TSharedRef<SWidget> Stone = SNew(SBorder).BorderImage(FCoreStyle::Get().GetBrush("WhiteBrush")).BorderBackgroundColor(SealColor);
+	if (SealMaterial)
+	{
+		SealPaste = UMaterialInstanceDynamic::Create(SealMaterial, this);
+		SealPaste->SetVectorParameterValue(TEXT("Paste"), SealColor);
+		SealPaste->SetVectorParameterValue(TEXT("Carved"), Carved);
+		SealBrush.SetResourceObject(SealPaste);
+		SealBrush.ImageSize = FVector2D(180.f, 180.f);
+		Stone = SNew(SImage).Image(&SealBrush);
+	}
 	SAssignNew(SealStamp, SBox)
 		.WidthOverride(180.f)
 		.HeightOverride(180.f)
 		[
-			SNew(SBorder)
-			.BorderImage(Solid)
-			.BorderBackgroundColor(SealColor)
-			.Padding(9.f)
+			SNew(SOverlay)
+			+ SOverlay::Slot()
 			[
-				SNew(SBorder)
-				.BorderImage(Solid)
-				.BorderBackgroundColor(Carved)
-				.Padding(3.f)
-				[
-					SNew(SBorder)
-					.BorderImage(Solid)
-					.BorderBackgroundColor(SealColor)
-					.Padding(10.f)
-					.HAlign(HAlign_Center)
-					.VAlign(VAlign_Center)
-					[
-						SNew(STextBlock)
-						.Text(FText::FromString(CurrentSongName()))
-						.Font(FCoreStyle::GetDefaultFontStyle("Bold", 30))
-						.ColorAndOpacity(Carved)
-						.Justification(ETextJustify::Center)
-						.AutoWrapText(true)
-					]
-				]
+				Stone
+			]
+			+ SOverlay::Slot()
+			.Padding(28.f)
+			.HAlign(HAlign_Center)
+			.VAlign(VAlign_Center)
+			[
+				SNew(STextBlock)
+				.Text(FText::FromString(SealText))
+				.Font(BrushFont(SealText.Contains(TEXT("\n")) ? 34.f : 38.f))
+				.ColorAndOpacity(Carved)
+				.Justification(ETextJustify::Center)
+				.AutoWrapText(true)
 			]
 		];
 	SealStamp->SetRenderTransformPivot(FVector2D(0.5f, 0.5f));
@@ -687,6 +657,37 @@ void AInkConductor::ShowSeal()
 			SealStamp.ToSharedRef()
 		];
 	Viewport->AddViewportWidgetContent(Seal.ToSharedRef(), 100);
+}
+
+void AInkConductor::RestyleHud()
+{
+	// the piano's hints and song title, written in ink on the paper instead of white type with a drop shadow
+	for (TObjectIterator<UUserWidget> It; It; ++It)
+	{
+		UUserWidget* Widget = *It;
+		if (Widget->GetWorld() != GetWorld() || !Widget->WidgetTree || StyledHud.Contains(Widget))
+		{
+			continue;
+		}
+		StyledHud.Add(Widget);
+		Widget->WidgetTree->ForEachWidget([this](UWidget* Child)
+		{
+			if (UTextBlock* Text = Cast<UTextBlock>(Child))
+			{
+				// the key hints have to stay legible, so only the song title is written with the brush
+				const float Size = Text->GetFont().Size;
+				const bool bHints = Text->GetText().ToString().Len() > 40;
+				Text->SetFont(bHints ? FCoreStyle::GetDefaultFontStyle("Regular", Size - 2.f) : BrushFont(Size + 4.f));
+				Text->SetColorAndOpacity(FSlateColor(HudColor));
+				Text->SetShadowColorAndOpacity(FLinearColor::Transparent);
+			}
+		});
+	}
+}
+
+FSlateFontInfo AInkConductor::BrushFont(float Size) const
+{
+	return BrushComposite ? FSlateFontInfo(BrushComposite, Size) : FCoreStyle::GetDefaultFontStyle("Regular", Size);
 }
 
 void AInkConductor::HideSeal()
@@ -725,6 +726,11 @@ namespace
 		TEXT("ink.Reset"),
 		TEXT("Wipe the ink painting and return to the player's view"),
 		FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld* World) { ForEachConductor(World, [](AInkConductor& Conductor) { Conductor.ResetPainting(); }); }));
+
+	FAutoConsoleCommandWithWorld InkGrowCommand(
+		TEXT("ink.Grow"),
+		TEXT("Raise every peak of the landscape to its full height now"),
+		FConsoleCommandWithWorldDelegate::CreateLambda([](UWorld* World) { ForEachConductor(World, [](AInkConductor& Conductor) { Conductor.FillLandscape(); }); }));
 
 	FAutoConsoleCommandWithWorldAndArgs InkSongCommand(
 		TEXT("ink.Song"),

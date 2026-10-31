@@ -2,169 +2,122 @@
 
 
 #include "InkCalligraphy.h"
-#include "Camera/PlayerCameraManager.h"
 #include "Engine/World.h"
-#include "GameFramework/PlayerController.h"
+#include "InkGlyphs.h"
+#include "Materials/MaterialInstanceDynamic.h"
 #include "Materials/MaterialInterface.h"
 #include "UObject/ConstructorHelpers.h"
-
-namespace
-{
-	// trail samples per second, and the most the ribbon can hold
-	constexpr float SampleRate = 40.f;
-	constexpr int32 MaxPoints = 240;
-}
 
 AInkCalligraphy::AInkCalligraphy()
 {
 	PrimaryActorTick.bCanEverTick = true;
-	Mesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("Stroke"));
+	Mesh = CreateDefaultSubobject<UProceduralMeshComponent>(TEXT("Inscription"));
 	RootComponent = Mesh;
 	Mesh->SetCastShadow(false);
 	Mesh->SetCollisionEnabled(ECollisionEnabled::NoCollision);
-	// the stroke is ink: custom depth keeps it in ink tones in the ink-wash post process
-	Mesh->SetRenderCustomDepth(true);
 
-	static ConstructorHelpers::FObjectFinder<UMaterialInterface> Stroke(TEXT("/Game/InkWash/Materials/M_InkStroke"));
-	StrokeMaterial = Stroke.Object;
+	static ConstructorHelpers::FObjectFinder<UMaterialInterface> Ink(TEXT("/Game/InkWash/Materials/M_InkScript"));
+	InkMaterial = Ink.Object;
+}
+
+void AInkCalligraphy::BeginPlay()
+{
+	Super::BeginPlay();
+	BuildMesh();
+}
+
+void AInkCalligraphy::BuildMesh()
+{
+	const int32 NumVertices = UE_ARRAY_COUNT(InkGlyphs::Vertices);
+	const int32 NumGlyphs = UE_ARRAY_COUNT(InkGlyphs::Glyphs);
+	const float Scale = CharacterSize / 1024.f;
+
+	TArray<FVector> Vertices;
+	TArray<FVector> Normals;
+	TArray<FVector2D> AlongAcross;
+	TArray<FVector2D> Order;
+	TArray<FVector2D> Unused;
+	TArray<FLinearColor> Colors;
+	TArray<FProcMeshTangent> Tangents;
+	const TArray<int32> Triangles(InkGlyphs::Triangles, UE_ARRAY_COUNT(InkGlyphs::Triangles));
+
+	int32 Glyph = 0;
+	for (int32 i = 0; i < NumVertices; ++i)
+	{
+		while (Glyph + 1 < NumGlyphs && i >= InkGlyphs::Glyphs[Glyph + 1][0])
+		{
+			++Glyph;
+		}
+		const float* V = InkGlyphs::Vertices[i];
+		// down each column, the columns from right to left; the em square has y up and its top at 900
+		const int32 Column = Glyph / FMath::Max(PerColumn, 1);
+		const int32 Row = Glyph % FMath::Max(PerColumn, 1);
+		Vertices.Add(FVector(Top.X - Column * CharacterSize * 1.1f + (V[0] - 512.f) * Scale, Top.Y, Top.Z - Row * CharacterSize * 1.05f - (900.f - V[1]) * Scale));
+		// facing back up the river, towards the piano
+		Normals.Add(FVector::YAxisVector);
+		AlongAcross.Add(FVector2D(V[2], V[3]));
+		Order.Add(FVector2D(V[4], V[5]));
+		Colors.Add(FLinearColor::White);
+		Tangents.Add(FProcMeshTangent(1.f, 0.f, 0.f));
+	}
+	// UV0: along and across the stroke (em units); UV1: writing order and the stroke's length
+	Mesh->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, AlongAcross, Order, Unused, Unused, Colors, Tangents, false, false);
+	MID = UMaterialInstanceDynamic::Create(InkMaterial, this);
+	MID->SetScalarParameterValue(TEXT("Written"), 0.f);
+	Mesh->SetMaterial(0, MID);
 }
 
 void AInkCalligraphy::AddNote(double Time, int32 Key, float Weight)
 {
-	Pending.Add({ Time, FMath::Lerp(LowZ, HighZ, FMath::Clamp(Key / 87.f, 0.f, 1.f)), Weight });
+	Pending.Add({ Time, Weight });
+}
+
+void AInkCalligraphy::SetSong(int32 MelodyNotes, float Seconds)
+{
+	// finished at about 85% of a short song, or within about a minute and a half of a long one
+	const float Notes = FMath::Min(MelodyNotes * 0.85f, MelodyNotes * 90.f / FMath::Max(Seconds, 1.f));
+	StrokesPerNote = InkGlyphs::NumStrokes / FMath::Max(Notes, 1.f);
 }
 
 void AInkCalligraphy::Clear()
 {
 	Pending.Reset();
-	Trail.Reset();
-	LastNoteTime = -1000.0;
-	Pressure = 0.f;
-	Mesh->SetVisibility(false);
+	Target = 0.f;
+	Written = 0.f;
+	LiftedUntil = 0.0;
+	if (MID)
+	{
+		MID->SetScalarParameterValue(TEXT("Written"), 0.f);
+	}
 }
 
 void AInkCalligraphy::Tick(float DeltaSeconds)
 {
 	Super::Tick(DeltaSeconds);
 	const double Now = GetWorld()->GetTimeSeconds();
-	UpdateBrush(DeltaSeconds, Now);
-	UpdateMesh(Now);
-}
 
-void AInkCalligraphy::UpdateBrush(float DeltaSeconds, double Now)
-{
-	// notes arrive in time order; take every one that has sounded by now
+	// notes arrive in time order; every one that has sounded by now asks the brush for a little more, louder ones more
 	while (Pending.Num() > 0 && Pending[0].Time <= Now)
 	{
-		if (Now - LastNoteTime > LiftAfter)
-		{
-			// the brush comes down right where the phrase starts
-			HeadZ = Pending[0].Z;
-		}
-		TargetZ = Pending[0].Z;
-		Pressure = FMath::Max(Pressure, Pending[0].Weight);
-		LastNoteTime = Pending[0].Time;
+		Target = FMath::Min(Target + StrokesPerNote * (0.6f + 0.8f * Pending[0].Weight), float(InkGlyphs::NumStrokes));
 		Pending.RemoveAt(0);
 	}
 
-	Pressure *= FMath::Exp(-3.5f * DeltaSeconds);
-	// glide towards the melody's height; exponential, so even a long hitch (loading a song) cannot overshoot
-	HeadZ = FMath::Lerp(HeadZ, TargetZ, 1.f - FMath::Exp(-6.f * DeltaSeconds));
-
-	if (Now - LastNoteTime > LiftAfter || Now - LastSampleTime < 1.0 / SampleRate)
+	// A stroke is begun only once the music has asked for all of it, and then drawn through at the brush's own
+	// pace, so the brush never stalls halfway along; between strokes it lifts for a moment.
+	const int32 Stroke = FMath::FloorToInt(Written);
+	if (Now >= LiftedUntil && Stroke < InkGlyphs::NumStrokes)
 	{
-		return;
-	}
-	SwingTime += Now - FMath::Max(LastSampleTime, Now - 0.1);
-	LastSampleTime = Now;
-
-	const float Angle = UE_HALF_PI * 0.85f * FMath::Sin(UE_TWO_PI * SwingTime / SwingSeconds);
-	const FVector Position = ArcCenter + FVector(ArcRadius * FMath::Sin(Angle), -ArcRadius * FMath::Cos(Angle), HeadZ + 10.f * FMath::Sin(SwingTime * 2.3));
-	if (Position.ContainsNaN())
-	{
-		// never let a bad sample into the mesh: NaN bounds stop the whole stroke from rendering
-		HeadZ = TargetZ;
-		return;
-	}
-	if (Trail.Num() > 0)
-	{
-		Travelled += FVector::Dist(Trail.Last().Position, Position);
-	}
-	Trail.Add({ Position, Pressure, Now, Travelled });
-	if (Trail.Num() > MaxPoints)
-	{
-		Trail.RemoveAt(0);
-	}
-}
-
-void AInkCalligraphy::UpdateMesh(double Now)
-{
-	while (Trail.Num() > 0 && Now - Trail[0].Time > TrailSeconds)
-	{
-		Trail.RemoveAt(0);
-	}
-	if (Trail.Num() < 2)
-	{
-		Mesh->SetVisibility(false);
-		return;
-	}
-
-	FVector Eye = FVector::ZeroVector;
-	const APlayerController* Player = GetWorld()->GetFirstPlayerController();
-	if (Player && Player->PlayerCameraManager)
-	{
-		Eye = Player->PlayerCameraManager->GetCameraLocation();
-	}
-
-	if (!bMeshCreated)
-	{
-		Vertices.Init(FVector::ZeroVector, MaxPoints * 2);
-		Normals.Init(FVector::UpVector, MaxPoints * 2);
-		UVs.Init(FVector2D::ZeroVector, MaxPoints * 2);
-		Colors.Init(FLinearColor::Transparent, MaxPoints * 2);
-		Tangents.Init(FProcMeshTangent(1.f, 0.f, 0.f), MaxPoints * 2);
-		for (int32 i = 0; i + 1 < MaxPoints; ++i)
+		const float StrokeEnd = Stroke + 1.f;
+		const bool bStarted = Written > Stroke;
+		if (bStarted || Target >= StrokeEnd)
 		{
-			const int32 A = 2 * i;
-			Triangles.Append({ A, A + 1, A + 2, A + 1, A + 3, A + 2 });
+			Written = FMath::Min(Written + BrushSpeed * DeltaSeconds / FMath::Max(InkGlyphs::StrokeLengths[Stroke], 1.f), StrokeEnd);
+			if (Written >= StrokeEnd)
+			{
+				LiftedUntil = Now + LiftSeconds;
+			}
+			MID->SetScalarParameterValue(TEXT("Written"), Written);
 		}
 	}
-
-	const FTransform& ToWorld = Mesh->GetComponentTransform();
-	const int32 Count = Trail.Num();
-	const float HeadDistance = Trail.Last().Distance;
-	for (int32 i = 0; i < MaxPoints; ++i)
-	{
-		// slots beyond the trail collapse onto the newest point, invisible
-		const int32 At = FMath::Min(i, Count - 1);
-		const FTrailPoint& Point = Trail[At];
-		const FVector Along = (Trail[FMath::Min(At + 1, Count - 1)].Position - Trail[FMath::Max(At - 1, 0)].Position).GetSafeNormal();
-		// facing the camera, so from any side it reads as one stroke of a brush
-		const FVector Side = FVector::CrossProduct(Along, (Eye - Point.Position).GetSafeNormal()).GetSafeNormal();
-		const float Age = FMath::Clamp(float((Now - Point.Time) / TrailSeconds), 0.f, 1.f);
-		// the last few centimetres taper to the brush tip, and old ink thins as it dries
-		const float Tip = FMath::Clamp((HeadDistance - Point.Distance) / 15.f, 0.f, 1.f);
-		const float Width = (MinWidth + (MaxWidth - MinWidth) * Point.Pressure) * (1.f - 0.45f * Age) * (0.25f + 0.75f * Tip);
-		const float Fade = i < Count ? 1.f - FMath::SmoothStep(0.7f, 1.f, Age) : 0.f;
-		for (int32 Edge = 0; Edge < 2; ++Edge)
-		{
-			const int32 V = 2 * i + Edge;
-			Vertices[V] = ToWorld.InverseTransformPosition(Point.Position + Side * Width * (Edge == 0 ? -0.5f : 0.5f));
-			UVs[V] = FVector2D(Point.Distance / 100.f, Edge);
-			Colors[V] = FLinearColor(Point.Pressure, Age, Fade, 1.f);
-		}
-	}
-
-	// vertex colours carry data (pressure, age, fade), so no sRGB conversion
-	if (!bMeshCreated)
-	{
-		Mesh->CreateMeshSection_LinearColor(0, Vertices, Triangles, Normals, UVs, Colors, Tangents, false, false);
-		Mesh->SetMaterial(0, StrokeMaterial);
-		bMeshCreated = true;
-	}
-	else
-	{
-		Mesh->UpdateMeshSection_LinearColor(0, Vertices, Normals, UVs, Colors, Tangents, false);
-	}
-	Mesh->SetVisibility(true);
 }
